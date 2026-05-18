@@ -25,6 +25,7 @@ class FilingSubmissionPayload(BaseModel):
     differently_abled_respondent: bool = False
 
     advocates: list[dict] = Field(default_factory=list)
+    full_metadata: dict = Field(default_factory=dict)
 
 
 class FilingSubmissionPreviewResponse(BaseModel):

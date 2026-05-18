@@ -13,6 +13,7 @@ from app.services.filing.filing_submission_validation_service import (
 )
 from app.services.filing.validation_issue_utils import dedupe_validation_issues
 from app.services.filing.field_quality_gate_service import FieldQualityGateService
+from app.services.filing.filing_full_metadata_service import FilingFullMetadataService
 
 
 class FilingPayloadBuilderService:
@@ -21,6 +22,7 @@ class FilingPayloadBuilderService:
         self.normalizer = FilingNormalizationService()
         self.validator = FilingSubmissionValidationService()
         self.quality_gate = FieldQualityGateService()
+        self.full_metadata_service = FilingFullMetadataService(db)
 
     def _run_quality_gate(
         self, payload: FilingFormPayload
@@ -189,6 +191,8 @@ class FilingPayloadBuilderService:
         elif extraction_job:
             extraction_job_id = extraction_job.id
             raw = self._build_raw_payload_from_extraction(extraction_job)
+
+        raw["full_metadata"] = self.full_metadata_service.get_payload_metadata(document_id)
 
         normalized = self.normalizer.normalize_payload(raw)
         normalized, quality_issues = self._run_quality_gate(normalized)

@@ -6,6 +6,7 @@ from app.api.v1.master_data import router as master_data_router
 from app.api.v1.party_autofill import router as party_autofill_router
 from app.api.v1.filing_review import router as filing_review_router
 from app.api.v1.filing_payload import router as filing_payload_router
+from app.api.v1.filing_full_metadata import router as filing_full_metadata_router
 from app.api.v1.filing_submission import router as filing_submission_router
 from app.api.v1.ecourt_payload import router as ecourt_payload_router
 from app.api.v1.layout_debug import router as layout_debug_router
@@ -20,6 +21,7 @@ api_router.include_router(party_autofill_router)
 api_router.include_router(filing_extraction_router)
 api_router.include_router(filing_review_router)
 api_router.include_router(filing_payload_router)
+api_router.include_router(filing_full_metadata_router)
 api_router.include_router(filing_submission_router)
 api_router.include_router(ecourt_payload_router)
 api_router.include_router(layout_debug_router)

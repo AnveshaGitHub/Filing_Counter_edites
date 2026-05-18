@@ -11,6 +11,7 @@ import SubmissionPreviewPanel from "./components/review/SubmissionPreviewPanel";
 import DebugPanel from "./components/review/DebugPanel";
 import SuggestionChips from "./components/SuggestionChips";
 import PartyMoreDetailsSection, { type MoreDetailsState } from "./components/form/PartyMoreDetailsSection";
+import PhhcTabs from "./components/phhc-tabs/PhhcTabs";
 
 import {
   getCaseTypes,
@@ -37,6 +38,7 @@ import {
 import { createReviewSession, getLatestReviewSession } from "./services/filingReviewApi";
 import { getFilingPayload } from "./services/filingPayloadApi";
 import { getSubmissionPreview, prepareSubmission, dryRunSubmission } from "./services/filingSubmissionApi";
+import { getFilingFullMetadata, saveFilingFullMetadata } from "./services/filingFullMetadataApi";
 
 import type { LocalTestDocumentResponse, ProcessTestDocumentResponse } from "./types/testDocuments";
 import type { ExtractionResponse, FieldResult } from "./types/filingExtraction";
@@ -49,6 +51,7 @@ import type {
 import type { EFilingFetchResponse } from "./types/efiling";
 import type { MasterOption } from "./types/masterData";
 import type { PartyAutofillResponse } from "./types/partyAutofill";
+import type { FilingFullMetadata } from "./types/filingFullMetadata";
 
 import {
   applyConfirmedExtractionToForm,
@@ -177,6 +180,7 @@ function App() {
   const [submissionPreview, setSubmissionPreview] = useState<FilingSubmissionPreviewResponse | null>(null);
   const [dryRunResult, setDryRunResult] = useState<DryRunSubmissionResponse | null>(null);
   const [form, setForm] = useState<FilingFormState>(emptyFormState);
+  const [fullMetadata, setFullMetadata] = useState<FilingFullMetadata>({});
   const [reviewedBy, setReviewedBy] = useState<string>("manual_tester");
   const [busy, setBusy] = useState<string>("");
   const [showDebug, setShowDebug] = useState<boolean>(false);
@@ -273,6 +277,17 @@ function App() {
   }, [localPdfUrl]);
 
   useEffect(() => {
+    if (!documentInfo?.id) {
+      setFullMetadata({});
+      return;
+    }
+
+    getFilingFullMetadata(documentInfo.id)
+      .then((response) => setFullMetadata(response.metadata || {}))
+      .catch(() => setFullMetadata({}));
+  }, [documentInfo?.id]);
+
+  useEffect(() => {
     const stateCode = petitionerMoreDetails.state || undefined;
     if (!stateCode) {
       setPetitionerDistrictOptions([]);
@@ -358,6 +373,7 @@ function App() {
     setSubmissionPreview(null);
     setDryRunResult(null);
     setForm(emptyFormState);
+    setFullMetadata({});
     setSpecialCase("");
     setPetitionerMoreDetails(emptyMoreDetails);
     setRespondentMoreDetails(emptyMoreDetails);
@@ -466,10 +482,29 @@ function App() {
     }
   };
 
+  const persistFullMetadata = async () => {
+    if (!documentInfo) return null;
+    const response = await saveFilingFullMetadata(documentInfo.id, fullMetadata);
+    setFullMetadata(response.metadata || {});
+    return response.metadata;
+  };
+
+  const handleSaveFullMetadata = async () => {
+    if (!documentInfo) return;
+    setBusy("save-full-metadata");
+    try {
+      await persistFullMetadata();
+      alert("Full eCourt metadata saved");
+    } finally {
+      setBusy("");
+    }
+  };
+
   const handlePreviewPayload = async () => {
     if (!documentInfo) return;
     setBusy("payload");
     try {
+      await persistFullMetadata();
       const data = await getFilingPayload(documentInfo.id);
       setPayloadPreview(data);
     } finally {
@@ -481,6 +516,7 @@ function App() {
     if (!documentInfo) return;
     setBusy("preview-submit");
     try {
+      await persistFullMetadata();
       const data = await getSubmissionPreview(documentInfo.id);
       setSubmissionPreview(data);
     } finally {
@@ -496,6 +532,7 @@ function App() {
     }
     setBusy("prepare-submit");
     try {
+      await persistFullMetadata();
       const data = await prepareSubmission(documentInfo.id);
       setSubmissionPreview(data);
     } finally {
@@ -511,6 +548,7 @@ function App() {
     }
     setBusy("dry-run-submit");
     try {
+      await persistFullMetadata();
       const data = await dryRunSubmission(documentInfo.id);
       setDryRunResult(data);
     } finally {
@@ -624,7 +662,10 @@ function App() {
       {activeWorkflowTab === "Main Party" ? (
         <div className="review-form-column">
           <SectionCard title="PHHC Filing Review Form">
-            <div className="form-grid">
+            <PhhcTabs
+              metadata={fullMetadata}
+              setMetadata={setFullMetadata}
+              mainParty={<div className="form-grid">
               <section className="form-section field--wide">
                 <h3 className="form-section__title">CaseType Bench / Case Details</h3>
                 <div className="form-subgrid">
@@ -951,48 +992,51 @@ function App() {
                   />
                 </div>
               </section>
-            </div>
+            </div>}
+              reviewActions={
+                <div className="review-actions-card phhc-main-review-actions">
+                  <label className="field bottom-action-field">
+                    <span>Reviewed By</span>
+                    <input value={reviewedBy} onChange={(event) => setReviewedBy(event.target.value)} />
+                  </label>
+                  <div className="review-action-buttons">
+                    <button className="btn" onClick={handleSaveReview} disabled={!extraction || busy !== ""}>
+                      {busy === "save-review" ? "Saving..." : "Save Review"}
+                    </button>
+                    <button className="btn" onClick={handleLoadReview} disabled={!documentInfo || busy !== ""}>
+                      {busy === "load-review" ? "Loading..." : "Load Review"}
+                    </button>
+                    <button className="btn" onClick={handlePreviewPayload} disabled={!documentInfo || busy !== ""}>
+                      {busy === "payload" ? "Loading..." : "Preview Payload"}
+                    </button>
+                    <button className="btn" onClick={handleSaveFullMetadata} disabled={!documentInfo || busy !== ""}>
+                      {busy === "save-full-metadata" ? "Saving..." : "Save Full Metadata"}
+                    </button>
+                    <button className="btn" onClick={handleLoadSubmissionPreview} disabled={!documentInfo || busy !== ""}>
+                      {busy === "preview-submit" ? "Loading..." : "Submission Preview"}
+                    </button>
+                    <button className="btn" onClick={handlePrepareSubmission} disabled={!documentInfo || busy !== ""}>
+                      {busy === "prepare-submit" ? "Preparing..." : "Prepare Submission Payload"}
+                    </button>
+                    <button className="btn btn-primary" onClick={handleDryRunSubmission} disabled={!documentInfo || busy !== ""}>
+                      {busy === "dry-run-submit" ? "Running..." : "Dry Run Submission"}
+                    </button>
+                  </div>
+                  <div className="submission-note">
+                    Save Review before preparing submission to include latest manual edits.
+                  </div>
+                  <div className="button-row">
+                    <button className="btn" onClick={() => setShowDebug((value) => !value)}>
+                      {showDebug ? "Hide Debug Panel" : "Show Debug Panel"}
+                    </button>
+                  </div>
+                </div>
+              }
+            />
           </SectionCard>
 
           <SectionCard title="Submission">
             <SubmissionPreviewPanel preview={submissionPreview} dryRunResult={dryRunResult} />
-          </SectionCard>
-
-          <SectionCard title="Review Actions">
-            <div className="review-actions-card">
-            <label className="field bottom-action-field">
-              <span>Reviewed By</span>
-              <input value={reviewedBy} onChange={(event) => setReviewedBy(event.target.value)} />
-            </label>
-            <div className="review-action-buttons">
-              <button className="btn" onClick={handleSaveReview} disabled={!extraction || busy !== ""}>
-                {busy === "save-review" ? "Saving..." : "Save Review"}
-              </button>
-              <button className="btn" onClick={handleLoadReview} disabled={!documentInfo || busy !== ""}>
-                {busy === "load-review" ? "Loading..." : "Load Review"}
-              </button>
-              <button className="btn" onClick={handlePreviewPayload} disabled={!documentInfo || busy !== ""}>
-                {busy === "payload" ? "Loading..." : "Preview Payload"}
-              </button>
-              <button className="btn" onClick={handleLoadSubmissionPreview} disabled={!documentInfo || busy !== ""}>
-                {busy === "preview-submit" ? "Loading..." : "Submission Preview"}
-              </button>
-              <button className="btn" onClick={handlePrepareSubmission} disabled={!documentInfo || busy !== ""}>
-                {busy === "prepare-submit" ? "Preparing..." : "Prepare Submission Payload"}
-              </button>
-              <button className="btn btn-primary" onClick={handleDryRunSubmission} disabled={!documentInfo || busy !== ""}>
-                {busy === "dry-run-submit" ? "Running..." : "Dry Run Submission"}
-              </button>
-            </div>
-            <div className="submission-note">
-              Save Review before preparing submission to include latest manual edits.
-            </div>
-            <div className="button-row">
-              <button className="btn" onClick={() => setShowDebug((value) => !value)}>
-                {showDebug ? "Hide Debug Panel" : "Show Debug Panel"}
-              </button>
-            </div>
-            </div>
           </SectionCard>
 
           <SectionCard title="Debug Panel" actions={<StatusPill label={showDebug ? "visible" : "hidden"} tone="neutral" />}>

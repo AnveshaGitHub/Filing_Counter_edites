@@ -79,4 +79,5 @@ class FilingNormalizationService:
                 raw.get("differently_abled_respondent") or raw.get("differentlyAbledRespondent")
             ),
             advocates=advocates,
+            full_metadata=raw.get("full_metadata") or raw.get("fullMetadata") or {},
         )

@@ -16,8 +16,6 @@ type Props = {
   onBack: () => void;
 };
 
-const tabs = ["Main Party", "Add. Advocate", "Checker Category", "Payment"];
-
 export default function FilingWorkspace({
   utilityPanel,
   children,
@@ -47,18 +45,8 @@ export default function FilingWorkspace({
             </div>
           )}
 
-          <div className="workflow-tabs">
-            {tabs.map((tab) => (
-              <button
-                key={tab}
-                type="button"
-                className={activeTab === tab ? "tab-active" : ""}
-                onClick={() => onTabChange?.(tab)}
-              >
-                {tab}
-              </button>
-            ))}
-          </div>
+          {void activeTab}
+          {void onTabChange}
 
           <div className={`review-split review-split--${pdfVisible ? pdfWidthMode : "full"}`}>
             <aside className="utility-pane">

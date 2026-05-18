@@ -62,6 +62,7 @@ class SubmissionMappingService:
             hide_party_respondent=payload_response.payload.hide_party_respondent,
             differently_abled_respondent=payload_response.payload.differently_abled_respondent,
             advocates=payload_response.payload.advocates,
+            full_metadata=payload_response.payload.full_metadata,
         )
 
         for key in ["petitioner_name", "respondent_name"]:

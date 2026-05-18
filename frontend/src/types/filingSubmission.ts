@@ -20,6 +20,7 @@ export interface FilingSubmissionPayload {
   differently_abled_respondent: boolean;
 
   advocates: Array<Record<string, string | null>>;
+  full_metadata: Record<string, unknown>;
 }
 
 export interface FilingSubmissionPreviewResponse {
