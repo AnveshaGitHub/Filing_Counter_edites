@@ -69,3 +69,10 @@ export interface FilingFullMetadataResponse {
   document_id: number;
   metadata: FilingFullMetadata;
 }
+
+export interface FilingFullMetadataAutofillResponse {
+  document_id: number;
+  section: string;
+  metadata: FilingFullMetadata;
+  notes: string[];
+}

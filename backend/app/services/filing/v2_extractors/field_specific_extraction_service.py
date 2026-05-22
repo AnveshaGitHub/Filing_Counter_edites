@@ -4,11 +4,14 @@ import logging
 from sqlalchemy.orm import Session
 
 from app.schemas.field_specific_extraction import FieldSpecificCandidate
+from app.schemas.page_classification import DocumentClassificationResult, PageClassificationResult
 from app.services.filing.candidate_persistence_service import CandidatePersistenceService
+from app.services.filing.field_context_builder_service import FieldContextBuilderService
 from app.services.filing.layout_party_extractor import LayoutAwarePartyDetailExtractor
 from app.services.filing.page_classifier_service import PageClassifierService, PageInput
 from app.services.filing.v2_extractors.advocate_v2_extractor import AdvocateV2Extractor
 from app.services.filing.v2_extractors.case_type_v2_extractor import CaseTypeV2Extractor
+from app.services.filing.v2_extractors.clean_block_extractor import CleanBlockExtractor
 from app.services.filing.v2_extractors.list_type_v2_extractor import ListTypeV2Extractor
 from app.services.filing.v2_extractors.party_name_v2_extractor import PartyNameV2Extractor
 from app.services.filing.v2_extractors.party_type_v2_extractor import PartyTypeV2Extractor
@@ -20,7 +23,9 @@ class FieldSpecificExtractionService:
     def __init__(self, db: Session) -> None:
         self.db = db
         self.classifier = PageClassifierService(db)
+        self.context_builder = FieldContextBuilderService(db)
         self.extractors = [
+            CleanBlockExtractor(),
             CaseTypeV2Extractor(),
             ListTypeV2Extractor(),
             PartyNameV2Extractor(),
@@ -37,10 +42,27 @@ class FieldSpecificExtractionService:
 
         all_candidates: list[FieldSpecificCandidate] = []
         rejected_count = 0
+        routed_page_nos: set[int] = set()
 
         for extractor in self.extractors:
             try:
-                out = extractor.extract(classification, pages)
+                if getattr(extractor, "use_full_pages", False):
+                    extractor_pages = pages
+                else:
+                    extractor_pages = self.context_builder.build_pages_for_fields(
+                        document_id=document_id,
+                        field_keys=getattr(extractor, "field_keys", set()),
+                        fallback_pages=pages,
+                    )
+                if extractor_pages != pages:
+                    routed_page_nos.update(page.page_no for page in extractor_pages)
+                extractor_classification = self._classify_extractor_pages(
+                    document_id=document_id,
+                    pages=extractor_pages,
+                    extractor=extractor,
+                    routed=extractor_pages != pages,
+                )
+                out = extractor.extract(extractor_classification, extractor_pages)
                 all_candidates.extend(out)
             except Exception:
                 logger.exception("[V2 EXTRACTOR] %s failed", extractor.__class__.__name__)
@@ -64,12 +86,62 @@ class FieldSpecificExtractionService:
         rejected_count += sum(1 for c in all_candidates if c.status == "rejected")
 
         debug = {
-            "extractor_version": "phase_9_3_v2+phase_9_4_layout_party",
+            "extractor_version": "phase_9_3_v2+phase_9_4_layout_party+phase_10_2_router+phase_10_3_regions+clean_block_main_party",
             "v2_candidates_count": len(deduped),
             "rejected_candidates_count": rejected_count,
             "page_types_used": sorted({p.page_type for p in classification.pages if p.page_type}),
+            "field_router_pages_used": sorted(routed_page_nos),
         }
         return deduped, debug
+
+    def _classify_extractor_pages(
+        self,
+        document_id: int,
+        pages: list[PageInput],
+        extractor,
+        routed: bool,
+    ) -> DocumentClassificationResult:
+        classification = self.classifier.classify_document(document_id=document_id, pages=pages)
+        if not routed:
+            return classification
+
+        allowed = sorted(getattr(extractor, "allowed_page_types", set()))
+        if not allowed:
+            return classification
+
+        preferred = self._preferred_page_type_for_extractor(extractor, allowed)
+        routed_pages = []
+        for page in classification.pages:
+            page_type = page.page_type if page.page_type in allowed else preferred
+            routed_pages.append(
+                PageClassificationResult(
+                    page_no=page.page_no,
+                    page_type=page_type,
+                    confidence=max(page.confidence, 0.72),
+                    reasons=[*page.reasons, "phase_10_3_region_routed"],
+                    text_preview=page.text_preview,
+                )
+            )
+
+        return DocumentClassificationResult(
+            document_id=document_id,
+            document_type=classification.document_type,
+            confidence=max(classification.confidence, 0.72),
+            reasons=[*classification.reasons, "phase_10_3_region_routed"],
+            pages=routed_pages,
+        )
+
+    def _preferred_page_type_for_extractor(self, extractor, allowed: list[str]) -> str:
+        field_keys = getattr(extractor, "field_keys", set())
+        if "advocate_name" in field_keys and "memo_of_appearance" in allowed:
+            return "memo_of_appearance"
+        if "list_type" in field_keys and "filing_scrutiny_report" in allowed:
+            return "filing_scrutiny_report"
+        if "case_type" in field_keys and "hc_cause_title" in allowed:
+            return "hc_cause_title"
+        if {"petitioner_name", "respondent_name"} & set(field_keys) and "hc_cause_title" in allowed:
+            return "hc_cause_title"
+        return allowed[0]
 
     def _case_type_from_filename(self, document_id: int) -> list[FieldSpecificCandidate]:
         try:

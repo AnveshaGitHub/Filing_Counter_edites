@@ -58,6 +58,52 @@ class CandidatePersistenceService:
 
         self._replace_candidates_sqlite(document_id, candidate_list)
 
+    def append_candidates(
+        self,
+        document_id: int,
+        candidates: Iterable[FieldSpecificCandidate],
+        extractor_prefix: str | None = None,
+    ) -> None:
+        candidate_list = list(candidates)
+        if not candidate_list:
+            return
+
+        if self.db is not None:
+            try:
+                from app.models.extracted_field_candidate import ExtractedFieldCandidate
+
+                if extractor_prefix:
+                    self.db.query(ExtractedFieldCandidate).filter(
+                        ExtractedFieldCandidate.document_id == document_id,
+                        ExtractedFieldCandidate.extractor.like(f"{extractor_prefix}%"),
+                    ).delete(synchronize_session=False)
+
+                for c in candidate_list:
+                    self.db.add(
+                        ExtractedFieldCandidate(
+                            document_id=document_id,
+                            field_key=c.field_key,
+                            value=c.value,
+                            normalized_value=c.normalized_value,
+                            confidence=c.confidence,
+                            status=c.status,
+                            source_page=c.page_no,
+                            page_type=c.page_type,
+                            bbox_json=None,
+                            evidence_text=c.evidence,
+                            extractor=c.extractor,
+                            validation_note=c.validation_note,
+                        )
+                    )
+
+                self.db.commit()
+                return
+            except Exception:
+                self.db.rollback()
+                logger.exception("[CANDIDATE DB] SQLAlchemy append failed, fallback sqlite")
+
+        self._append_candidates_sqlite(document_id, candidate_list, extractor_prefix)
+
     def list_candidates(self, document_id: int) -> list[dict]:
         if self.db is not None:
             try:
@@ -100,6 +146,49 @@ class CandidatePersistenceService:
         cur = conn.cursor()
 
         cur.execute("DELETE FROM extracted_field_candidates WHERE document_id=?", (document_id,))
+
+        for c in candidates:
+            cur.execute(
+                """
+                INSERT INTO extracted_field_candidates (
+                    document_id, field_key, value, normalized_value, confidence, status,
+                    source_page, page_type, bbox_json, evidence_text, extractor, validation_note
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    document_id,
+                    c.field_key,
+                    c.value,
+                    c.normalized_value,
+                    c.confidence,
+                    c.status,
+                    c.page_no,
+                    c.page_type,
+                    None,
+                    c.evidence,
+                    c.extractor,
+                    c.validation_note,
+                ),
+            )
+
+        conn.commit()
+        conn.close()
+
+    def _append_candidates_sqlite(
+        self,
+        document_id: int,
+        candidates: list[FieldSpecificCandidate],
+        extractor_prefix: str | None = None,
+    ) -> None:
+        conn = sqlite3.connect(self.sqlite_path)
+        cur = conn.cursor()
+
+        if extractor_prefix:
+            cur.execute(
+                "DELETE FROM extracted_field_candidates WHERE document_id=? AND extractor LIKE ?",
+                (document_id, f"{extractor_prefix}%"),
+            )
 
         for c in candidates:
             cur.execute(

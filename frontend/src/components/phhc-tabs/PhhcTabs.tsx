@@ -10,13 +10,24 @@ const TABS = ["Main Party", "Additional Party", "Additional Advocate", "Lower Co
 type TabName = (typeof TABS)[number];
 
 type Props = {
+  documentId?: number;
   metadata: FilingFullMetadata;
   setMetadata: Dispatch<SetStateAction<FilingFullMetadata>>;
   mainParty: ReactNode;
   reviewActions: ReactNode;
+  onAutofillMetadata: (section: "additional-parties" | "additional-advocates" | "lower-court") => Promise<void>;
+  autofillingSection?: string;
 };
 
-export default function PhhcTabs({ metadata, setMetadata, mainParty, reviewActions }: Props) {
+export default function PhhcTabs({
+  documentId,
+  metadata,
+  setMetadata,
+  mainParty,
+  reviewActions,
+  onAutofillMetadata,
+  autofillingSection,
+}: Props) {
   const [active, setActive] = useState<TabName>("Main Party");
 
   const set = (key: string, value: unknown) => {
@@ -40,9 +51,33 @@ export default function PhhcTabs({ metadata, setMetadata, mainParty, reviewActio
             {reviewActions}
           </MainPartyTab>
         )}
-        {active === "Additional Party" && <AdditionalPartyTab metadata={metadata} set={set} />}
-        {active === "Additional Advocate" && <AdditionalAdvocateTab metadata={metadata} set={set} />}
-        {active === "Lower Court" && <LowerCourtTab metadata={metadata} set={set} />}
+        {active === "Additional Party" && (
+          <AdditionalPartyTab
+            documentId={documentId}
+            metadata={metadata}
+            set={set}
+            onAutofill={onAutofillMetadata}
+            autofilling={autofillingSection === "additional-parties"}
+          />
+        )}
+        {active === "Additional Advocate" && (
+          <AdditionalAdvocateTab
+            documentId={documentId}
+            metadata={metadata}
+            set={set}
+            onAutofill={onAutofillMetadata}
+            autofilling={autofillingSection === "additional-advocates"}
+          />
+        )}
+        {active === "Lower Court" && (
+          <LowerCourtTab
+            documentId={documentId}
+            metadata={metadata}
+            set={set}
+            onAutofill={onAutofillMetadata}
+            autofilling={autofillingSection === "lower-court"}
+          />
+        )}
       </div>
     </div>
   );

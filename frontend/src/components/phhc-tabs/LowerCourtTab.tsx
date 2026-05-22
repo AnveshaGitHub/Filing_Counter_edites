@@ -2,8 +2,11 @@ import type { FilingFullMetadata } from "../../types/filingFullMetadata";
 import { Field, Panel, SearchStrip, SelectField, TextArea } from "./shared";
 
 type Props = {
+  documentId?: number;
   metadata: FilingFullMetadata;
   set: (key: string, value: unknown) => void;
+  onAutofill: (section: "lower-court") => Promise<void>;
+  autofilling?: boolean;
 };
 
 function valueOf(metadata: FilingFullMetadata, key: string): string {
@@ -11,12 +14,22 @@ function valueOf(metadata: FilingFullMetadata, key: string): string {
   return typeof value === "string" ? value : "";
 }
 
-export default function LowerCourtTab({ metadata, set }: Props) {
+export default function LowerCourtTab({ documentId, metadata, set, onAutofill, autofilling = false }: Props) {
   return (
     <>
       <SearchStrip metadata={metadata} set={set} buttonText="Fetch Details" />
 
       <Panel title="Lower Court Details">
+        <div className="button-row">
+          <button
+            type="button"
+            className="phhc-primary-btn"
+            disabled={!documentId || autofilling}
+            onClick={() => onAutofill("lower-court")}
+          >
+            {autofilling ? "Autofilling..." : "Autofill Lower Court Details"}
+          </button>
+        </div>
         <div className="phhc-grid phhc-grid-4">
           <SelectField label="Court Type" value={valueOf(metadata, "lower_court_type")} onChange={(value) => set("lower_court_type", value)} options={["District Court", "High Court", "Other"]} />
           <Field label="CNR No." value={valueOf(metadata, "lower_court_cnr_no")} onChange={(value) => set("lower_court_cnr_no", value)} />

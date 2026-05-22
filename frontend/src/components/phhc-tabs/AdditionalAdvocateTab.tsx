@@ -68,12 +68,34 @@ function AdvocateRows({
   );
 }
 
-export default function AdditionalAdvocateTab({ metadata, set }: { metadata: FilingFullMetadata; set: (key: string, value: unknown) => void }) {
+export default function AdditionalAdvocateTab({
+  documentId,
+  metadata,
+  set,
+  onAutofill,
+  autofilling = false,
+}: {
+  documentId?: number;
+  metadata: FilingFullMetadata;
+  set: (key: string, value: unknown) => void;
+  onAutofill: (section: "additional-advocates") => Promise<void>;
+  autofilling?: boolean;
+}) {
   return (
     <>
       <SearchStrip metadata={metadata} set={set} />
 
       <Panel title="Advocate Details">
+        <div className="button-row">
+          <button
+            type="button"
+            className="phhc-primary-btn"
+            disabled={!documentId || autofilling}
+            onClick={() => onAutofill("additional-advocates")}
+          >
+            {autofilling ? "Autofilling..." : "Autofill Advocate Details"}
+          </button>
+        </div>
         <AdvocateRows
           title="Petitioner"
           rows={metadata.petitioner_extra_advocates || []}

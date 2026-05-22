@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import textwrap
 from pathlib import Path
 from datetime import datetime
 import fitz
@@ -17,6 +18,8 @@ from app.services.filing.page_classifier_service import PageClassifierService
 from app.services.filing.page_region_classifier_service import PageRegionClassifierService
 from app.services.filing.utils.page_layout_analyzer import classify_page
 from app.services.filing.utils.text_cleaner import clean_page_text
+from app.services.filing.field_page_router_service import FieldPageRouterService
+from app.services.filing.routed_region_extractor_service import RoutedRegionExtractorService
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +228,16 @@ class LocalTestDocumentService:
         self.db.commit()
         self.db.refresh(doc_row)
 
+        try:
+            FieldPageRouterService(self.db).build_routes(document_id=document_id)
+        except Exception:
+            logger.exception("[FIELD ROUTER] failed document_id=%s", document_id)
+
+        try:
+            RoutedRegionExtractorService(self.db).build_regions(document_id=document_id)
+        except Exception:
+            logger.exception("[ROUTED REGION] failed document_id=%s", document_id)
+
         return {
             "document_id": document_id,
             "status": doc_row.status,
@@ -233,6 +246,94 @@ class LocalTestDocumentService:
             "pages_with_embedded_text": pages_with_embedded_text,
             "pages_with_ocr_fallback": pages_with_ocr_fallback,
         }
+
+    def build_ocr_pdf_file(self, document_id: int) -> tuple[bytes, str]:
+        doc_row = self.get_document(document_id)
+        if not doc_row:
+            raise ValueError("local_test_document_not_found")
+
+        page_rows = (
+            self.db.query(LocalTestDocumentPage)
+            .filter(LocalTestDocumentPage.document_id == document_id)
+            .order_by(LocalTestDocumentPage.page_no.asc())
+            .all()
+        )
+        if not page_rows:
+            raise ValueError("local_test_document_not_processed")
+
+        base_name = Path(doc_row.original_filename or f"document_{document_id}").stem
+        filename = f"{document_id}_{base_name}_ocr_text.pdf"
+        return self._create_ocr_pdf(doc_row.original_filename, page_rows), filename
+
+    def _create_ocr_pdf(self, original_filename: str, page_rows: list[LocalTestDocumentPage]) -> bytes:
+        pdf = fitz.open()
+        page = pdf.new_page(width=595, height=842)
+        margin = 48
+        y = margin
+        line_height = 14
+        max_y = 800
+
+        def add_line(text: str, font_size: int = 10, bold: bool = False) -> None:
+            nonlocal page, y
+            if y > max_y:
+                page = pdf.new_page(width=595, height=842)
+                y = margin
+            fontname = "helv"
+            page.insert_text(
+                (margin, y),
+                self._pdf_safe_text(text),
+                fontsize=font_size,
+                fontname=fontname,
+                color=(0, 0, 0),
+            )
+            y += line_height + (4 if bold else 0)
+
+        header_lines = [
+            "Extracted OCR Text",
+            f"Source file: {original_filename or '-'}",
+            f"Pages: {len(page_rows)}",
+            "",
+        ]
+
+        for index, line in enumerate(header_lines):
+            add_line(line, font_size=16 if index == 0 else 10, bold=index == 0)
+
+        for page_row in page_rows:
+            confidence = page_row.ocr_confidence
+            if confidence is None:
+                confidence = page_row.ocr_avg_confidence
+            confidence_text = f"{confidence:.2%}" if confidence is not None else "N/A"
+            method = page_row.extraction_method or "unknown"
+
+            add_line(f"Page {page_row.page_no}", font_size=13, bold=True)
+            add_line(f"Confidence score: {confidence_text}")
+            add_line(f"Extraction method: {method}")
+
+            text = (page_row.ocr_text or "").strip()
+            if text:
+                for line in text.splitlines():
+                    wrapped_lines = textwrap.wrap(
+                        line,
+                        width=92,
+                        replace_whitespace=False,
+                        drop_whitespace=False,
+                    ) or [""]
+                    for wrapped_line in wrapped_lines:
+                        add_line(wrapped_line)
+            else:
+                add_line("[No OCR text extracted]")
+            add_line("")
+
+        content = pdf.tobytes()
+        pdf.close()
+        return content
+
+    def _pdf_safe_text(self, text: str) -> str:
+        return "".join(
+            char
+            for char in str(text)
+            if char == "\t" or ord(char) >= 32
+        )
 
     def ensure_main_document_stub(self, document_id: int) -> bool:
         """

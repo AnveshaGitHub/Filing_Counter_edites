@@ -12,7 +12,20 @@ class PartyTypeV2Extractor(BaseV2Extractor):
 
     def infer_type(self, name: str) -> tuple[str, float]:
         low = name.lower()
-        if any(x in low for x in ["state of madhya pradesh", "govt", "government", "collector", "police station", "department"]):
+        if any(
+            x in low
+            for x in [
+                "state of madhya pradesh",
+                "state of m.p",
+                "state of mp",
+                "govt",
+                "government",
+                "collector",
+                "police station",
+                "department",
+                "tehsildar",
+            ]
+        ):
             return "State Department", 0.86
         if any(x in low for x in ["company", "limited", "corporation", "society", "trust", "bank"]):
             return "Other Organization", 0.76

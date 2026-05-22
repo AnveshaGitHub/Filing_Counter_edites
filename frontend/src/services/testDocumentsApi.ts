@@ -32,3 +32,24 @@ export async function runTestDocumentExtraction(
   const response = await api.post(`/api/v1/test-documents/${documentId}/run-extraction`, payload);
   return response.data;
 }
+
+export async function downloadTestDocumentOcrPdf(documentId: number): Promise<Blob> {
+  const response = await api.get(`/api/v1/test-documents/${documentId}/ocr-pdf`, {
+    responseType: "blob"
+  });
+  return response.data;
+}
+
+export async function downloadTestDocumentCleanOcrDebug(documentId: number): Promise<Blob> {
+  const response = await api.get(`/api/v1/test-documents/${documentId}/clean-ocr-debug`, {
+    responseType: "blob"
+  });
+  return response.data;
+}
+
+export async function downloadTestDocumentCheckpointReport(documentId: number): Promise<Blob> {
+  const response = await api.get(`/api/v1/test-documents/${documentId}/checkpoint-report`, {
+    responseType: "blob"
+  });
+  return response.data;
+}

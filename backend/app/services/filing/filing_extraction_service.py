@@ -12,18 +12,24 @@ from app.schemas.filing_extraction import (
     ExtractionResponse,
     ExtractionRunRequest,
     ExtractionJobSummary,
+    AdvocateRowResult,
     FieldEvidence,
     FieldResult,
     FieldCandidate,
+    PartyMoreDetailsResult,
 )
 from app.services.filing.field_registry_service import FieldRegistryService
 from app.services.filing.filing_retrieval_service import FilingRetrievalService
 from app.services.filing.candidate_extraction_service import CandidateExtractionService
 from app.services.filing.field_validation_service import FieldValidationService
+from app.services.filing.field_context_builder_service import FieldContextBuilderService
+from app.services.filing.field_page_router_service import FieldPageRouterService
+from app.services.filing.routed_region_extractor_service import RoutedRegionExtractorService
 from app.services.filing.confidence_scoring_service import ConfidenceScoringService
 from app.services.filing.feedback_rerank_service import FeedbackRerankService
 from app.services.filing.document_type_router_service import DocumentTypeRouterService
 from app.services.filing.lower_court_extractor import LowerCourtExtractor
+from app.services.filing.filing_metadata_graph_extractor import FilingMetadataGraphExtractor, PartyNode
 from app.services.filing.page_priority_service import PagePriorityService, PageText
 from app.services.filing.v2_extractors import FieldSpecificExtractionService
 from app.services.filing.utils.field_grouping import build_grouped_fields
@@ -70,6 +76,7 @@ class FilingExtractionService:
         self.retrieval = FilingRetrievalService(db)
         self.candidate_extractor = CandidateExtractionService()
         self.validator = FieldValidationService()
+        self.context_builder = FieldContextBuilderService(db)
         self.scorer = ConfidenceScoringService()
         self.feedback_reranker = FeedbackRerankService(db)
         self.document_type_router = DocumentTypeRouterService()
@@ -80,7 +87,7 @@ class FilingExtractionService:
             document_id=document_id,
             form_type=payload.form_type,
             status="queued" if payload.run_async else "running",
-            extractor_version="v5_phase_5",
+            extractor_version="v5_phase_5+phase_10_2_router+phase_10_3_regions",
             triggered_by=payload.triggered_by,
             started_at=None if payload.run_async else datetime.utcnow(),
         )
@@ -370,6 +377,7 @@ class FilingExtractionService:
                 candidates.extend(by_field.get(alias, []))
             candidates.sort(key=lambda c: c.confidence, reverse=True)
             best = candidates[0] if candidates else None
+            best_is_clean_block = bool(best and str(getattr(best, "extractor", "")).startswith("clean_block_"))
 
             # First clean current value if possible.
             if current_value:
@@ -385,6 +393,45 @@ class FilingExtractionService:
                     current_is_bad = True
             else:
                 current_is_bad = True
+
+            # Clean-block candidates are high-precision labels from the cause-title
+            # party block. Let them upgrade low-confidence or equivalent current
+            # values for the main party fields without changing unrelated fields.
+            if (
+                best
+                and best_is_clean_block
+                and field_key
+                in {
+                    "case_type",
+                    "petitioner_name",
+                    "respondent_name",
+                    "petitioner_party_type",
+                    "respondent_party_type",
+                }
+            ):
+                best_value = best.normalized_value or best.value
+                current_key = str(getattr(field, "normalized_value", None) or current_value or "").strip().upper()
+                best_key = str(best_value or "").strip().upper()
+                should_upgrade = (
+                    not current_value
+                    or current_is_bad
+                    or current_key == best_key
+                    or float(getattr(field, "confidence", 0.0) or 0.0) < 0.74
+                )
+                if best_key and should_upgrade and best.confidence >= 0.82:
+                    field.value = best.value
+                    field.normalized_value = best_value
+                    field.confidence = max(float(getattr(field, "confidence", 0.0) or 0.0), best.confidence)
+                    field.status = "confirmed" if best.confidence >= 0.85 else "suggested"
+
+                    if hasattr(field, "evidence") and field.evidence:
+                        field.evidence.source_type = best.extractor
+                        field.evidence.page_from = best.page_no
+                        field.evidence.page_to = best.page_no
+                        field.evidence.text = best.evidence
+                        field.evidence.validation_notes = "upgraded_by_clean_block_candidate"
+                    current_value = field.value
+                    current_is_bad = False
 
             # Replace if missing/bad and v2 has clean candidate.
             if best and (not current_value or current_is_bad):
@@ -478,7 +525,7 @@ class FilingExtractionService:
         linked_name_evidence: dict | None = None,
     ) -> tuple[FieldResult, list[dict], str | None]:
         field_def = self.registry.get(field_key)
-        context = self.retrieval.build_field_context(
+        context = self.context_builder.build_field_context(
             document_id=document_id,
             field_key=field_key,
             linked_name_value=linked_name_value,
@@ -557,9 +604,39 @@ class FilingExtractionService:
         )
         self.db.add(row)
 
+    def _sync_persisted_field_results(self, job_id: int, fields: list[FieldResult]) -> None:
+        rows = (
+            self.db.query(ExtractedField)
+            .filter(ExtractedField.extraction_job_id == job_id)
+            .all()
+        )
+        by_key = {row.field_key: row for row in rows}
+        for result in fields:
+            row = by_key.get(result.field_key)
+            if not row:
+                continue
+            row.raw_value = result.value
+            row.normalized_value = result.normalized_value
+            row.confidence = result.confidence
+            row.status = result.status
+            row.source_type = result.evidence.source_type if result.evidence else None
+            row.source_page_from = result.evidence.page_from if result.evidence else None
+            row.source_page_to = result.evidence.page_to if result.evidence else None
+            row.source_chunk_id = result.evidence.chunk_id if result.evidence else None
+            row.evidence_text = result.evidence.text if result.evidence else None
+            row.validation_notes = result.evidence.validation_notes if result.evidence else None
+
     def _run_job(self, job: ExtractionJob) -> ExtractionResponse:
         document_id = job.document_id
         self._delete_existing_job_fields(job.id)
+        try:
+            FieldPageRouterService(self.db).build_routes(document_id=document_id)
+        except Exception:
+            logger.exception("[FIELD ROUTER] route build failed document_id=%s", document_id)
+        try:
+            RoutedRegionExtractorService(self.db).build_regions(document_id=document_id)
+        except Exception:
+            logger.exception("[ROUTED REGION] region build failed document_id=%s", document_id)
 
         job.status = "running"
         job.started_at = datetime.utcnow()
@@ -639,7 +716,7 @@ class FilingExtractionService:
             field_results.append(result)
             extracted_map[field_key] = result
 
-        petitioner_party_candidates_ctx = self.retrieval.build_field_context(
+        petitioner_party_candidates_ctx = self.context_builder.build_field_context(
             document_id=document_id,
             field_key="petitioner_party_candidates",
         )
@@ -652,7 +729,7 @@ class FilingExtractionService:
             petitioner_party_candidates,
         )
 
-        respondent_party_candidates_ctx = self.retrieval.build_field_context(
+        respondent_party_candidates_ctx = self.context_builder.build_field_context(
             document_id=document_id,
             field_key="respondent_party_candidates",
         )
@@ -695,7 +772,7 @@ class FilingExtractionService:
             field_results.append(result)
             extracted_map[field_key] = result
 
-        advocate_rows_context = self.retrieval.build_field_context(
+        advocate_rows_context = self.context_builder.build_field_context(
             document_id=document_id, field_key="advocate_rows"
         )
         advocate_row_candidates = self.candidate_extractor.extract_candidates(
@@ -720,7 +797,7 @@ class FilingExtractionService:
             ],
         )
 
-        petitioner_details_context = self.retrieval.build_field_context(
+        petitioner_details_context = self.context_builder.build_field_context(
             document_id=document_id, field_key="petitioner_more_details"
         )
         petitioner_details_candidates = self.candidate_extractor.extract_candidates(
@@ -728,7 +805,7 @@ class FilingExtractionService:
         )
         petitioner_more_details = build_party_more_details(petitioner_details_candidates)
 
-        respondent_details_context = self.retrieval.build_field_context(
+        respondent_details_context = self.context_builder.build_field_context(
             document_id=document_id, field_key="respondent_more_details"
         )
         respondent_details_candidates = self.candidate_extractor.extract_candidates(
@@ -823,6 +900,7 @@ class FilingExtractionService:
 
         v2_candidates, v2_debug = FieldSpecificExtractionService(self.db).extract(document_id)
         response = self._merge_v2_candidates(response, v2_candidates)
+        response = self._apply_graph_candidates_to_response(document_id, response)
         response.review_flags.extend(
             [
                 f"v2_candidates:{v2_debug.get('v2_candidates_count', 0)}",
@@ -830,8 +908,289 @@ class FilingExtractionService:
                 f"v2_page_types:{','.join(v2_debug.get('page_types_used', []))}",
             ]
         )
+        self._sync_persisted_field_results(job.id, response.fields)
+        job.extractor_version = response.job.extractor_version
+        self.db.commit()
 
         return response
+
+    def _apply_graph_candidates_to_response(self, document_id: int, response: ExtractionResponse) -> ExtractionResponse:
+        try:
+            graph = FilingMetadataGraphExtractor(self.db).extract(document_id)
+        except Exception:
+            logger.exception("[GRAPH MERGE] graph extraction failed document_id=%s", document_id)
+            return response
+
+        petitioner = self._main_graph_party(graph.parties, "petitioner")
+        respondent = self._main_graph_party(graph.parties, "respondent")
+        if petitioner:
+            self._promote_graph_field(response, "petitioner_name", petitioner.name, petitioner, "graph_party_name")
+            self._promote_graph_field(response, "petitioner_party_type", petitioner.party_type, petitioner, "graph_party_type")
+            self._apply_graph_party_details(response, "petitioner", petitioner)
+        if respondent:
+            self._promote_graph_field(response, "respondent_name", respondent.name, respondent, "graph_party_name")
+            self._promote_graph_field(response, "respondent_party_type", respondent.party_type, respondent, "graph_party_type")
+            self._apply_graph_party_details(response, "respondent", respondent)
+
+        advocate_rows = self._advocate_rows_from_graph(graph.advocates)
+        if advocate_rows:
+            response.grouped.advocate_rows = advocate_rows
+            first_advocate = graph.advocates[0]
+            self._promote_simple_graph_field(
+                response,
+                "advocate_name",
+                first_advocate.name,
+                "graph_advocate",
+                first_advocate.confidence,
+                first_advocate.source_page,
+                first_advocate.evidence,
+            )
+            self._promote_simple_graph_field(
+                response,
+                "advocate_enrol_no",
+                first_advocate.enrol_no,
+                "graph_advocate",
+                first_advocate.confidence,
+                first_advocate.source_page,
+                first_advocate.evidence,
+            )
+            self._promote_simple_graph_field(
+                response,
+                "advocate_enrol_year",
+                first_advocate.enrol_year,
+                "graph_advocate",
+                first_advocate.confidence,
+                first_advocate.source_page,
+                first_advocate.evidence,
+            )
+            self._promote_simple_graph_field(
+                response,
+                "advocate_mobile",
+                first_advocate.mobile,
+                "graph_advocate",
+                first_advocate.confidence,
+                first_advocate.source_page,
+                first_advocate.evidence,
+            )
+
+        if graph.lower_court:
+            response.review_flags = sorted(set((response.review_flags or []) + ["graph_candidates_applied"]))
+        return response
+
+    def _promote_simple_graph_field(
+        self,
+        response: ExtractionResponse,
+        field_key: str,
+        value: str | None,
+        source_type: str,
+        confidence: float,
+        page_no: int | None,
+        evidence: str,
+    ) -> None:
+        if not value:
+            return
+        field = next((row for row in response.fields if row.field_key == field_key), None)
+        if not field:
+            return
+        current = str(field.value or field.normalized_value or "").strip()
+        if current and float(field.confidence or 0.0) >= float(confidence or 0.0) and not self._is_bad_advocate_name(current):
+            return
+        field.value = value
+        field.normalized_value = value
+        field.confidence = max(float(field.confidence or 0.0), float(confidence or 0.0))
+        field.status = "confirmed" if field.confidence >= 0.86 else "suggested"
+        field.evidence = FieldEvidence(
+            source_type=source_type,
+            page_from=page_no,
+            page_to=page_no,
+            text=evidence,
+            validation_notes="upgraded_by_graph_candidate",
+        )
+
+    def _main_graph_party(self, parties: list[PartyNode], side: str) -> PartyNode | None:
+        rows = [row for row in parties if row.side == side and row.name]
+        if not rows:
+            return None
+        rows.sort(key=lambda row: (self._graph_party_no_key(row.party_no), -row.confidence))
+        return rows[0]
+
+    def _graph_party_no_key(self, value: str) -> tuple[int, str]:
+        import re
+
+        match = re.match(r"(\d+)(?:\.([A-Z]))?", value or "")
+        if not match:
+            return (999, value or "")
+        return (int(match.group(1)), match.group(2) or "")
+
+    def _promote_graph_field(
+        self,
+        response: ExtractionResponse,
+        field_key: str,
+        value: str | None,
+        party: PartyNode,
+        source_type: str,
+    ) -> None:
+        if not value:
+            return
+        field = next((row for row in response.fields if row.field_key == field_key), None)
+        if not field:
+            return
+        current = (field.normalized_value or field.value or "").strip()
+        current_bad = self._is_bad_legacy_value(field_key, current)
+        graph_conf = max(float(party.confidence or 0.0), 0.88 if field_key.endswith("_name") else 0.86)
+        should_promote = (
+            not current
+            or current_bad
+            or float(field.confidence or 0.0) < 0.86
+            or (field_key.endswith("_name") and " and others" in current.lower())
+            or str(field.evidence.source_type if field.evidence else "").startswith(("regex", "rule", "phase_"))
+        )
+        if not should_promote:
+            self._append_graph_suggestion(field, value, graph_conf, party, source_type)
+            return
+
+        field.value = value
+        field.normalized_value = value
+        field.confidence = max(float(field.confidence or 0.0), graph_conf)
+        field.status = "confirmed" if field.confidence >= 0.86 else "suggested"
+        field.evidence = FieldEvidence(
+            source_type=source_type,
+            page_from=party.source_page,
+            page_to=party.source_page,
+            chunk_id=None,
+            text=party.evidence,
+            validation_notes="upgraded_by_graph_candidate",
+        )
+
+        if response.grouped:
+            for section_name in ["petitioner_fields", "respondent_fields", "core_fields"]:
+                section = getattr(response.grouped, section_name, None)
+                if section and field_key in section:
+                    section[field_key] = field
+        self._append_graph_suggestion(field, value, graph_conf, party, source_type)
+
+    def _append_graph_suggestion(
+        self,
+        field: FieldResult,
+        value: str,
+        confidence: float,
+        party: PartyNode,
+        source_type: str,
+    ) -> None:
+        existing = {
+            str(item.normalized_value or item.value or "").strip().upper()
+            for item in (field.suggestions or [])
+        }
+        key = value.strip().upper()
+        if key in existing:
+            return
+        field.suggestions.append(
+            FieldCandidate(
+                value=value,
+                normalized_value=value,
+                confidence=confidence,
+                status="suggested",
+                evidence=FieldEvidence(
+                    source_type=source_type,
+                    page_from=party.source_page,
+                    page_to=party.source_page,
+                    chunk_id=None,
+                    text=party.evidence,
+                    validation_notes="graph_candidate",
+                ),
+            )
+        )
+
+    def _is_bad_legacy_value(self, field_key: str, value: str) -> bool:
+        low = (value or "").strip().lower()
+        if not low:
+            return True
+        if field_key.endswith("_name"):
+            if low in {"versus", "vs", "v", "select"}:
+                return True
+            if "in the high court" in low or "brief chronological" in low:
+                return True
+            if low.startswith(("date ", "appellant /", "petitioner /")):
+                return True
+        return False
+
+    def _apply_graph_party_details(self, response: ExtractionResponse, side: str, party: PartyNode) -> None:
+        if not response.grouped:
+            return
+        target = response.grouped.petitioner_more_details if side == "petitioner" else response.grouped.respondent_more_details
+        if target is None:
+            target = PartyMoreDetailsResult()
+            if side == "petitioner":
+                response.grouped.petitioner_more_details = target
+            else:
+                response.grouped.respondent_more_details = target
+        for attr, value in {
+            "address": party.present_address or party.address,
+            "district": party.district,
+            "state": party.state,
+            "mobile": party.phone_mobile,
+            "email": party.email_id,
+        }.items():
+            if value:
+                setattr(target, attr, value)
+            elif attr in {"mobile", "email"}:
+                setattr(target, attr, None)
+        if any([party.address, party.present_address, party.district, party.state, party.phone_mobile, party.email_id]):
+            target.status = "confirmed" if party.confidence >= 0.86 else "suggested"
+            target.confidence = max(float(target.confidence or 0.0), float(party.confidence or 0.0))
+            target.evidence = [
+                FieldEvidence(
+                    source_type="graph_party_details",
+                    page_from=party.source_page,
+                    page_to=party.source_page,
+                    text=party.evidence,
+                    validation_notes="upgraded_by_graph_candidate",
+                )
+            ]
+
+    def _advocate_rows_from_graph(self, advocates) -> list[AdvocateRowResult]:
+        clean = []
+        for adv in advocates:
+            if not adv.name:
+                continue
+            if self._is_bad_advocate_name(adv.name):
+                continue
+            clean.append(adv)
+        clean.sort(key=lambda row: (row.side != "petitioner", -float(row.confidence or 0.0), row.name))
+        rows: list[AdvocateRowResult] = []
+        for idx, adv in enumerate(clean[:4]):
+            rows.append(
+                AdvocateRowResult(
+                    row_index=idx,
+                    status="confirmed" if float(adv.confidence or 0.0) >= 0.86 else "suggested",
+                    confidence=float(adv.confidence or 0.0),
+                    adv_code=None,
+                    enrol_no=adv.enrol_no or None,
+                    enrol_year=adv.enrol_year or None,
+                    name=adv.name,
+                    mobile=adv.mobile or None,
+                    remark=f"{adv.side.title()} advocate",
+                    evidence=[
+                        FieldEvidence(
+                            source_type="graph_advocate",
+                            page_from=adv.source_page,
+                            page_to=adv.source_page,
+                            text=adv.evidence,
+                            validation_notes="upgraded_by_graph_candidate",
+                        )
+                    ],
+                    suggestions={},
+                )
+            )
+        return rows
+
+    def _is_bad_advocate_name(self, value: str) -> bool:
+        return bool(
+            not value
+            or "high court" in value.lower()
+            or "name of the main advocate" in value.lower()
+            or value.strip().lower() in {"advocate", "counsel"}
+        )
 
     def run_sync(self, document_id: int, payload: ExtractionRunRequest) -> ExtractionResponse:
         job = self.create_job(document_id=document_id, payload=payload)

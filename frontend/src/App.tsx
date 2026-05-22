@@ -34,11 +34,18 @@ import {
   processTestDocument,
   getTestDocument,
   runTestDocumentExtraction,
+  downloadTestDocumentOcrPdf,
+  downloadTestDocumentCleanOcrDebug,
+  downloadTestDocumentCheckpointReport,
 } from "./services/testDocumentsApi";
 import { createReviewSession, getLatestReviewSession } from "./services/filingReviewApi";
 import { getFilingPayload } from "./services/filingPayloadApi";
 import { getSubmissionPreview, prepareSubmission, dryRunSubmission } from "./services/filingSubmissionApi";
-import { getFilingFullMetadata, saveFilingFullMetadata } from "./services/filingFullMetadataApi";
+import {
+  autofillFilingFullMetadata,
+  getFilingFullMetadata,
+  saveFilingFullMetadata,
+} from "./services/filingFullMetadataApi";
 
 import type { LocalTestDocumentResponse, ProcessTestDocumentResponse } from "./types/testDocuments";
 import type { ExtractionResponse, FieldResult } from "./types/filingExtraction";
@@ -163,6 +170,28 @@ function applyLocationCascade(prev: MoreDetailsState, patch: Partial<MoreDetails
     next.village = "";
   }
   return next;
+}
+
+function safeDownloadName(name: string): string {
+  return name.replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, "_");
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function downloadJsonFile(value: unknown, filename: string) {
+  const blob = new Blob([JSON.stringify(value, null, 2)], {
+    type: "application/json"
+  });
+  downloadBlob(blob, filename);
 }
 
 function App() {
@@ -454,6 +483,48 @@ function App() {
     }
   };
 
+  const handleDownloadExtractionJson = () => {
+    if (!documentInfo || !extraction) return;
+    const baseName = safeDownloadName(documentInfo.original_filename.replace(/\.pdf$/i, ""));
+    downloadJsonFile(extraction, `${documentInfo.id}_${baseName}_extraction.json`);
+  };
+
+  const handleDownloadOcrPdf = async () => {
+    if (!documentInfo) return;
+    setBusy("download-ocr-pdf");
+    try {
+      const blob = await downloadTestDocumentOcrPdf(documentInfo.id);
+      const baseName = safeDownloadName(documentInfo.original_filename.replace(/\.pdf$/i, ""));
+      downloadBlob(blob, `${documentInfo.id}_${baseName}_ocr_text.pdf`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const handleDownloadCleanOcrDebug = async () => {
+    if (!documentInfo) return;
+    setBusy("download-clean-ocr-debug");
+    try {
+      const blob = await downloadTestDocumentCleanOcrDebug(documentInfo.id);
+      const baseName = safeDownloadName(documentInfo.original_filename.replace(/\.pdf$/i, ""));
+      downloadBlob(blob, `${documentInfo.id}_${baseName}_clean_ocr_debug.json`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const handleDownloadCheckpointReport = async () => {
+    if (!documentInfo) return;
+    setBusy("download-checkpoint-report");
+    try {
+      const blob = await downloadTestDocumentCheckpointReport(documentInfo.id);
+      const baseName = safeDownloadName(documentInfo.original_filename.replace(/\.pdf$/i, ""));
+      downloadBlob(blob, `${documentInfo.id}_${baseName}_checkpoint_report.pdf`);
+    } finally {
+      setBusy("");
+    }
+  };
+
   const handleApplyConfirmed = () => {
     if (!extraction) return;
     setForm((prev) => applyConfirmedExtractionToForm(extraction, prev));
@@ -580,6 +651,19 @@ function App() {
     }
   };
 
+  const handleAutofillMetadata = async (
+    section: "additional-parties" | "additional-advocates" | "lower-court"
+  ) => {
+    if (!documentInfo) return;
+    setBusy(`autofill-${section}`);
+    try {
+      const response = await autofillFilingFullMetadata(documentInfo.id, section);
+      setFullMetadata(response.metadata || {});
+    } finally {
+      setBusy("");
+    }
+  };
+
   const utilityPanel = (
     <>
       <SectionCard title="Upload PDF">
@@ -625,6 +709,30 @@ function App() {
             <button className="btn" onClick={handleApplyConfirmed} disabled={!extraction}>
               Apply Confirmed
             </button>
+            <button className="btn" onClick={handleDownloadExtractionJson} disabled={!extraction || busy !== ""}>
+              Download JSON
+            </button>
+            <button
+              className="btn"
+              onClick={handleDownloadOcrPdf}
+              disabled={!documentInfo || documentInfo.status !== "processed" || busy !== ""}
+            >
+              {busy === "download-ocr-pdf" ? "Preparing PDF..." : "Download OCR Text"}
+            </button>
+            <button
+              className="btn"
+              onClick={handleDownloadCleanOcrDebug}
+              disabled={!documentInfo || documentInfo.status !== "processed" || busy !== ""}
+            >
+              {busy === "download-clean-ocr-debug" ? "Preparing Debug..." : "Download Clean OCR Debug"}
+            </button>
+            <button
+              className="btn"
+              onClick={handleDownloadCheckpointReport}
+              disabled={!documentInfo || documentInfo.status !== "processed" || busy !== ""}
+            >
+              {busy === "download-checkpoint-report" ? "Preparing Report..." : "Download Checkpoint Report"}
+            </button>
           </div>
         </div>
       </SectionCard>
@@ -663,8 +771,11 @@ function App() {
         <div className="review-form-column">
           <SectionCard title="PHHC Filing Review Form">
             <PhhcTabs
+              documentId={documentInfo?.id}
               metadata={fullMetadata}
               setMetadata={setFullMetadata}
+              onAutofillMetadata={handleAutofillMetadata}
+              autofillingSection={busy.startsWith("autofill-") ? busy.replace("autofill-", "") : ""}
               mainParty={<div className="form-grid">
               <section className="form-section field--wide">
                 <h3 className="form-section__title">CaseType Bench / Case Details</h3>

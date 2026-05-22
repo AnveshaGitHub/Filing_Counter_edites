@@ -2,11 +2,14 @@ import type { ExtraPartyItem, FilingFullMetadata } from "../../types/filingFullM
 import { Field, Panel, SearchStrip, SelectField } from "./shared";
 
 type Props = {
+  documentId?: number;
   metadata: FilingFullMetadata;
   set: (key: string, value: unknown) => void;
+  onAutofill: (section: "additional-parties") => Promise<void>;
+  autofilling?: boolean;
 };
 
-export default function AdditionalPartyTab({ metadata, set }: Props) {
+export default function AdditionalPartyTab({ documentId, metadata, set, onAutofill, autofilling = false }: Props) {
   const parties = metadata.extra_parties || [];
 
   const updateParty = (index: number, key: keyof ExtraPartyItem, value: string) => {
@@ -62,9 +65,19 @@ export default function AdditionalPartyTab({ metadata, set }: Props) {
       </Panel>
 
       <Panel title="Memo of Parties / Additional Party">
-        <button type="button" className="phhc-primary-btn" onClick={addParty}>
-          Add Party
-        </button>
+        <div className="button-row">
+          <button type="button" className="phhc-primary-btn" onClick={addParty}>
+            Add Party
+          </button>
+          <button
+            type="button"
+            className="phhc-secondary-btn"
+            disabled={!documentId || autofilling}
+            onClick={() => onAutofill("additional-parties")}
+          >
+            {autofilling ? "Autofilling..." : "Autofill Additional Parties"}
+          </button>
+        </div>
 
         {parties.length === 0 && <div className="phhc-info">Load a case or add a party to start memo of parties.</div>}
 

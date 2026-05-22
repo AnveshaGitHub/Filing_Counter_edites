@@ -7,6 +7,7 @@ from app.models.extracted_field import ExtractedField
 from app.models.local_test_document_page import LocalTestDocumentPage
 from app.services.filing.field_quality_gate_service import FieldQualityGateService
 from app.services.filing.document_type_router_service import DocumentTypeRouterService
+from app.services.filing.filing_metadata_graph_extractor import FilingMetadataGraphExtractor
 from app.services.filing.layout_party_extractor.ocr_text_party_block_parser import OCRTextPartyBlockParser
 from app.services.filing.page_priority_service import PageText
 from app.schemas.party_autofill import PartyAutofillResponse, PartyAutofillData, PartyAutofillField
@@ -34,6 +35,7 @@ class StrictPartyAutofillService:
         self.db = db
         self.quality_gate = FieldQualityGateService()
         self.ocr_text_block_parser = OCRTextPartyBlockParser()
+        self.graph_extractor = FilingMetadataGraphExtractor(db)
 
     def _clean(self, text: str | None) -> str:
         if not text:
@@ -253,6 +255,10 @@ class StrictPartyAutofillService:
         page_texts = self._pages_text(document_id)
         lower_court_source = self.is_lower_court_source(document_id)
 
+        graph_response = self._autofill_from_party_graph(document_id, side, lower_court_source)
+        if graph_response:
+            return graph_response
+
         parser_response = self._apply_parser_candidates(
             document_id=document_id,
             side=side,
@@ -365,6 +371,80 @@ class StrictPartyAutofillService:
             skipped.append("father_or_husband")
 
         skipped.append("name_suffix")
+
+        return PartyAutofillResponse(
+            document_id=document_id,
+            side=side,
+            safe_to_apply=True,
+            data=data,
+            accepted_fields=sorted(set(accepted)),
+            rejected_fields=sorted(set(rejected)),
+            skipped_fields=sorted(set(skipped)),
+            quality_results=quality_results,
+        )
+
+    def _autofill_from_party_graph(
+        self,
+        document_id: int,
+        side: str,
+        lower_court_source: bool,
+    ) -> PartyAutofillResponse | None:
+        party = self.graph_extractor.main_party(document_id, side)
+        if not party:
+            return None
+
+        field_values = {
+            "relation": party.relation,
+            "father_or_husband": party.father_husband_name,
+            "age": party.age,
+            "occupation": party.occupation,
+            "state": party.state,
+            "district": party.district,
+            "tehsil": party.tehsil,
+            "village": party.place_city,
+            "phone_mobile": party.phone_mobile,
+            "email_id": party.email_id,
+            "address": party.present_address or party.address,
+        }
+        if party.state or party.district or party.address:
+            field_values["country"] = "India"
+
+        data = PartyAutofillData()
+        accepted: list[str] = []
+        rejected: list[str] = []
+        skipped: list[str] = ["name_suffix"]
+        quality_results = []
+
+        for field_name, value in field_values.items():
+            if not value:
+                if field_name != "country":
+                    skipped.append(field_name)
+                continue
+            quality = self.quality_gate.validate(field_name, value)
+            quality_results.append(quality)
+            if quality.status in {"accepted", "cleaned"}:
+                cleaned = quality.cleaned_value or value
+                setattr(
+                    data,
+                    field_name,
+                    PartyAutofillField(
+                        value=cleaned,
+                        confidence=max(0.0, party.confidence - quality.confidence_penalty),
+                        source_page=party.source_page,
+                        evidence=party.evidence[:160],
+                    ),
+                )
+                accepted.append(field_name)
+            elif quality.status == "skipped":
+                skipped.append(f"{field_name}:{quality.reason or 'skipped'}")
+            else:
+                rejected.append(f"{field_name}:{quality.reason or 'quality_rejected'}")
+
+        if not accepted:
+            return None
+
+        if lower_court_source:
+            skipped.append("lower_court_source_review_warning_graph_candidates_applied")
 
         return PartyAutofillResponse(
             document_id=document_id,
