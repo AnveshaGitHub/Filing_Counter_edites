@@ -88,7 +88,7 @@ class LocalTestDocumentService:
             ocr_text = (ocr_result.text or "").strip()
 
             if len(ocr_text) > len(embedded_text):
-                return ocr_text, "ocr_fallback", ocr_result.confidence, ocr_result.raw_result
+                return ocr_text, f"ocr_{ocr_result.engine}", ocr_result.confidence, ocr_result.raw_result
 
             return embedded_text, "pdf_text" if embedded_text else "none", 1.0 if embedded_text else 0.0, None
 
@@ -125,7 +125,9 @@ class LocalTestDocumentService:
         page_rows: list[LocalTestDocumentPage] = []
         total_chunks = 0
         pages_with_embedded_text = 0
-        pages_with_ocr_fallback = 0
+        pages_with_ocr = 0
+        pages_with_paddle = 0
+        pages_with_tesseract = 0
 
         for idx, page in enumerate(pdf):
             page_no = idx + 1
@@ -159,8 +161,12 @@ class LocalTestDocumentService:
 
             if extraction_method == "pdf_text" and text_length > 0:
                 pages_with_embedded_text += 1
-            elif extraction_method == "ocr_fallback" and text_length > 0:
-                pages_with_ocr_fallback += 1
+            elif extraction_method.startswith("ocr_") and text_length > 0:
+                pages_with_ocr += 1
+                if extraction_method == "ocr_paddle":
+                    pages_with_paddle += 1
+                elif extraction_method == "ocr_tesseract":
+                    pages_with_tesseract += 1
 
             logger.info(
                 "[LOCAL TEST] page=%s, method=%s, raw_final_text_len=%s, cleaned_text_len=%s, page_types=%s",
@@ -222,7 +228,9 @@ class LocalTestDocumentService:
         doc_row.notes = (
             f"pages={len(page_rows)}, chunks={total_chunks}, "
             f"pdf_text_pages={pages_with_embedded_text}, "
-            f"ocr_pages={pages_with_ocr_fallback}"
+            f"ocr_pages={pages_with_ocr}, "
+            f"paddle_pages={pages_with_paddle}, "
+            f"tesseract_pages={pages_with_tesseract}"
         )
         doc_row.updated_at = datetime.utcnow()
         self.db.commit()
@@ -244,7 +252,9 @@ class LocalTestDocumentService:
             "pages": len(page_rows),
             "chunks": total_chunks,
             "pages_with_embedded_text": pages_with_embedded_text,
-            "pages_with_ocr_fallback": pages_with_ocr_fallback,
+            "pages_with_ocr": pages_with_ocr,
+            "pages_with_paddle": pages_with_paddle,
+            "pages_with_tesseract": pages_with_tesseract,
         }
 
     def build_ocr_pdf_file(self, document_id: int) -> tuple[bytes, str]:

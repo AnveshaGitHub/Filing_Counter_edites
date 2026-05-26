@@ -89,6 +89,12 @@ class VisionFallbackService:
         self.max_pages = int(os.getenv("FILING_VISION_MAX_PAGES", "3"))
         self.timeout = int(os.getenv("FILING_VISION_TIMEOUT_SECONDS", "120"))
         self.render_dpi = int(os.getenv("FILING_VISION_RENDER_DPI", "180"))
+        self.target_key_pages = os.getenv("FILING_VISION_TARGET_KEY_PAGES", "true").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
     def extract_candidates(self, document_id: int) -> tuple[list[FieldSpecificCandidate], dict[str, Any]]:
         if not self.enabled:
@@ -135,6 +141,9 @@ class VisionFallbackService:
             low = text.lower()
             confidence = row.ocr_avg_confidence if row.ocr_avg_confidence is not None else row.ocr_confidence
             score = 0.0
+            key_page_score = self._key_page_score(low)
+            if self.target_key_pages and key_page_score:
+                score += key_page_score
             if confidence is not None and confidence < 0.72:
                 score += 2.0
             if len(text.strip()) < 200:
@@ -148,6 +157,28 @@ class VisionFallbackService:
 
         scored.sort(key=lambda item: item[0], reverse=True)
         return [row for _score, row in scored]
+
+    def _key_page_score(self, low: str) -> float:
+        """Prefer vision on pages where specific form/table data is usually visible."""
+        score = 0.0
+
+        cause_title_tokens = ["petitioner", "respondent", "versus", "appellant", "non-applicant"]
+        party_detail_tokens = ["father", "husband", "address", "district", "tehsil", "age", "party"]
+        vakalatnama_tokens = ["vakalatnama", "advocate", "enrol", "enrollment", "bar council", "mobile", "email"]
+        lower_court_tokens = ["lower court", "impugned", "judgment", "order", "case no", "court"]
+
+        if sum(1 for token in cause_title_tokens if token in low) >= 2:
+            score += 3.0
+        if sum(1 for token in party_detail_tokens if token in low) >= 2:
+            score += 2.0
+        if sum(1 for token in vakalatnama_tokens if token in low) >= 2:
+            score += 3.5
+        if sum(1 for token in lower_court_tokens if token in low) >= 2:
+            score += 2.0
+        if re.search(r"[\u0900-\u097f]", low):
+            score += 1.5
+
+        return score
 
     def _looks_garbled(self, text: str) -> bool:
         if not text:

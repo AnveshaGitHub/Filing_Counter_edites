@@ -10,7 +10,7 @@ from typing import Any
 class OCRResult:
     text: str
     confidence: float | None = None
-    engine: str = "tesseract"
+    engine: str = "unknown"
     raw_result: dict[str, Any] | None = None
 
 
@@ -21,9 +21,33 @@ class LocalOCRService:
             in {"1", "true", "yes", "on"}
         )
         self.dpi = int(os.getenv("LOCAL_OCR_DPI", "200"))
+        self.primary_engine = os.getenv("LOCAL_OCR_PRIMARY_ENGINE", "paddle").strip().lower()
+        self.fallback_engine = os.getenv("LOCAL_OCR_FALLBACK_ENGINE", "tesseract").strip().lower()
+        self.min_confidence = float(os.getenv("LOCAL_OCR_MIN_CONFIDENCE", "0.55"))
+        self.paddle_lang = os.getenv("PADDLE_OCR_LANG", "en").strip() or "en"
+        self.paddle_use_gpu = (
+            os.getenv("PADDLE_OCR_USE_GPU", "false").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
         self.tesseract_cmd = os.getenv("TESSERACT_CMD")
+        self._paddle_ocr: Any | None = None
 
     def is_available(self) -> bool:
+        if not self.enabled:
+            return False
+        return self.is_paddle_available() or self.is_tesseract_available()
+
+    def is_paddle_available(self) -> bool:
+        if not self.enabled:
+            return False
+        try:
+            import paddleocr  # noqa: F401
+
+            return True
+        except Exception:
+            return False
+
+    def is_tesseract_available(self) -> bool:
         if not self.enabled:
             return False
         try:
@@ -46,6 +70,130 @@ class LocalOCRService:
             pass
 
     def ocr_pil_image(self, image: Any) -> OCRResult:
+        if not self.enabled:
+            return OCRResult(text="", confidence=0.0, engine="disabled", raw_result=None)
+
+        primary = self.primary_engine
+        fallback = self.fallback_engine
+
+        if primary == "paddle":
+            primary_result = self.ocr_with_paddle(image)
+            if self._is_strong_result(primary_result) or fallback != "tesseract":
+                return primary_result
+
+            fallback_result = self.ocr_with_tesseract(image)
+            if self._prefer_fallback(primary_result, fallback_result):
+                return fallback_result
+            return primary_result
+
+        if primary == "tesseract":
+            return self.ocr_with_tesseract(image)
+
+        return OCRResult(text="", confidence=0.0, engine=f"unsupported:{primary}", raw_result=None)
+
+    def ocr_with_paddle(self, image: Any) -> OCRResult:
+        try:
+            ocr = self._get_paddle_ocr()
+            if ocr is None:
+                return OCRResult(text="", confidence=0.0, engine="paddle_unavailable", raw_result=None)
+
+            try:
+                import numpy as np
+
+                ocr_input = np.array(image.convert("RGB") if hasattr(image, "convert") else image)
+            except Exception:
+                ocr_input = image
+
+            result = ocr.ocr(ocr_input, cls=True)
+            text, confidence = self._paddle_text_and_confidence(result)
+            return OCRResult(
+                text=text,
+                confidence=confidence,
+                engine="paddle",
+                raw_result={"result": result},
+            )
+        except Exception as exc:
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                engine="paddle_failed",
+                raw_result={"error": str(exc)},
+            )
+
+    def _get_paddle_ocr(self) -> Any | None:
+        if self._paddle_ocr is not None:
+            return self._paddle_ocr
+
+        try:
+            from paddleocr import PaddleOCR
+        except Exception:
+            return None
+
+        try:
+            self._paddle_ocr = PaddleOCR(
+                use_angle_cls=True,
+                lang=self.paddle_lang,
+                use_gpu=self.paddle_use_gpu,
+                show_log=False,
+            )
+        except TypeError:
+            self._paddle_ocr = PaddleOCR(
+                use_angle_cls=True,
+                lang=self.paddle_lang,
+                use_gpu=self.paddle_use_gpu,
+            )
+        return self._paddle_ocr
+
+    def _paddle_text_and_confidence(self, result: Any) -> tuple[str, float | None]:
+        lines: list[str] = []
+        confidences: list[float] = []
+
+        items = result or []
+        if isinstance(items, list) and len(items) == 1 and isinstance(items[0], list):
+            items = items[0]
+
+        for item in items:
+            try:
+                payload = item[1]
+                text = payload[0] if isinstance(payload, (list, tuple)) else ""
+                confidence = payload[1] if isinstance(payload, (list, tuple)) and len(payload) > 1 else None
+            except Exception:
+                continue
+
+            if text:
+                lines.append(str(text))
+            if confidence is not None:
+                try:
+                    confidences.append(float(confidence))
+                except Exception:
+                    pass
+
+        avg = round(sum(confidences) / len(confidences), 4) if confidences else None
+        return "\n".join(lines), avg
+
+    def _is_strong_result(self, result: OCRResult) -> bool:
+        text = (result.text or "").strip()
+        confidence = result.confidence if result.confidence is not None else 0.0
+        return len(text) >= 50 and confidence >= self.min_confidence
+
+    def _prefer_fallback(self, primary: OCRResult, fallback: OCRResult) -> bool:
+        primary_text = (primary.text or "").strip()
+        fallback_text = (fallback.text or "").strip()
+        if not fallback_text:
+            return False
+        if len(fallback_text) > max(len(primary_text) * 1.25, len(primary_text) + 80):
+            return True
+        primary_conf = primary.confidence if primary.confidence is not None else 0.0
+        fallback_conf = fallback.confidence if fallback.confidence is not None else 0.0
+        return primary_conf < self.min_confidence and fallback_conf > primary_conf
+
+    def ocr_with_tesseract(self, image: Any) -> OCRResult:
+        if not self.is_tesseract_available():
+            return OCRResult(text="", confidence=0.0, engine="tesseract_unavailable", raw_result=None)
+
+        return self._ocr_with_tesseract(image)
+
+    def _ocr_with_tesseract(self, image: Any) -> OCRResult:
         import pytesseract
 
         self.configure_engine()
