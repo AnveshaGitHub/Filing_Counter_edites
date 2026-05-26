@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 SQLITE_PATH = BASE_DIR / "filing_counter.db"
-DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{SQLITE_PATH.as_posix()}")
+DATABASE_URL = os.getenv("DATABASE_URL") or f"sqlite:///{SQLITE_PATH.as_posix()}"
 
 engine_kwargs: dict = {
     "pool_pre_ping": True,
