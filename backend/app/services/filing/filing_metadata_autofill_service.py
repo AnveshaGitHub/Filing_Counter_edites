@@ -50,12 +50,50 @@ class FilingMetadataAutofillService:
             metadata.respondent_extra_advocates = respondent_rows
             for key, value in patch.items():
                 setattr(metadata, key, value)
+                
+            field_mapping = {
+                "case_type": "case_type",
+                "case_no": "case_no",
+                "case_year": "case_year",
+                "petitioner_name": "petitioner_display_name",
+                "respondent_name": "respondent_display_name",
+                "lower_court_case_type": "lower_court_case_type",
+                "lower_court_case_no": "lower_court_case_no",
+                "lower_court_case_year": "lower_court_case_year",
+                "judge_name": "judge_name",
+                "judge_designation": "judge_designation",
+                "impugned_judgment_date": "impugned_judgment_date",
+                "impugned_subject_law": "impugned_subject_law",
+                "impugned_brief_description": "impugned_brief_description",
+                "advocate_name": "petitioner_main_advocate",
+                "advocate_enrol_no": "petitioner_main_advocate_no",
+                "advocate_enrol_year": "petitioner_main_advocate_year",
+                "advocate_mobile": "petitioner_main_advocate_mobile",
+                "advocate_email": "petitioner_main_advocate_email",
+            }
+            
+            autofill_count = 0
+            for candidate in candidate_debug.get("merged_top", []):
+                if candidate.get("auto_fill_ready"):
+                    field_key = candidate.get("field_key")
+                    val = candidate.get("normalized_value") or candidate.get("value")
+                    
+                    if field_key in field_mapping:
+                        attr_name = field_mapping[field_key]
+                        if hasattr(metadata, attr_name) and not getattr(metadata, attr_name):
+                            setattr(metadata, attr_name, val)
+                            autofill_count += 1
+                    elif hasattr(metadata, field_key) and not getattr(metadata, field_key):
+                        setattr(metadata, field_key, val)
+                        autofill_count += 1
+
             notes.extend(
                 [
                     f"additional_parties:{len(parties)}",
                     f"petitioner_advocates:{len(petitioner_rows)}",
                     f"respondent_advocates:{len(respondent_rows)}",
                     f"lower_court_fields:{len(patch)}",
+                    f"auto_filled_fields:{autofill_count}",
                 ]
             )
         else:

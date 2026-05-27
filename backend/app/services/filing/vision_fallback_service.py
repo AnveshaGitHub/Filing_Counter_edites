@@ -110,7 +110,7 @@ class VisionFallbackService:
 
         all_candidates: list[FieldSpecificCandidate] = []
         page_results: list[dict[str, Any]] = []
-        for page_row in selected_pages[: self.max_pages]:
+        for page_row in selected_pages:
             try:
                 image_b64 = self._render_page_base64(Path(doc.stored_path), page_row.page_no)
                 payload = self._call_ollama(image_b64)
@@ -123,7 +123,7 @@ class VisionFallbackService:
         return all_candidates, {
             "enabled": True,
             "model": self.model,
-            "selected_pages": [row.page_no for row in selected_pages[: self.max_pages]],
+            "selected_pages": [row.page_no for row in selected_pages],
             "results": page_results,
         }
 
