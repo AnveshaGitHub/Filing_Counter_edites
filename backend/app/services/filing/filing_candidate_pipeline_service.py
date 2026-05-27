@@ -237,6 +237,11 @@ class FilingCandidatePipelineService:
             return False
         if row.get("status") == "rejected":
             return False
-        if str(row.get("validation_note") or "").startswith("vision_candidate"):
-            return False
-        return float(row.get("confidence") or 0.0) >= 0.86
+        
+        confidence = float(row.get("confidence") or 0.0)
+        extractor = str(row.get("extractor") or "")
+        
+        if extractor.startswith("vision_"):
+            return confidence >= 0.70
+            
+        return confidence >= 0.86

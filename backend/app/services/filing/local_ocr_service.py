@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import io
 import os
+import base64
+import json
+import requests
 from dataclasses import dataclass
 from typing import Any
+from PIL import ImageEnhance
 
 
 @dataclass
@@ -21,6 +25,9 @@ class LocalOCRService:
             in {"1", "true", "yes", "on"}
         )
         self.dpi = int(os.getenv("LOCAL_OCR_DPI", "200"))
+        self.vision_enabled = os.getenv("FILING_VISION_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+        self.vision_url = os.getenv("FILING_VISION_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+        self.vision_model = os.getenv("FILING_VISION_MODEL", "llama3.2-vision")
         self.primary_engine = os.getenv("LOCAL_OCR_PRIMARY_ENGINE", "paddle").strip().lower()
         self.fallback_engine = os.getenv("LOCAL_OCR_FALLBACK_ENGINE", "tesseract").strip().lower()
         self.min_confidence = float(os.getenv("LOCAL_OCR_MIN_CONFIDENCE", "0.55"))
@@ -69,27 +76,83 @@ class LocalOCRService:
         except Exception:
             pass
 
+    def _preprocess_image(self, image: Any) -> Any:
+        if not hasattr(image, "convert"):
+            return image
+        try:
+            img = image.convert("L")
+            enhancer = ImageEnhance.Contrast(img)
+            img = enhancer.enhance(2.0)
+            enhancer2 = ImageEnhance.Sharpness(img)
+            img = enhancer2.enhance(1.5)
+            return img.convert("RGB")
+        except Exception:
+            return image
+
+    def ocr_with_vision(self, image: Any) -> OCRResult:
+        if not self.vision_enabled:
+            return OCRResult(text="", confidence=0.0, engine="vision_disabled", raw_result=None)
+        try:
+            if not hasattr(image, "convert"):
+                return OCRResult(text="", confidence=0.0, engine="vision_failed_input", raw_result=None)
+            
+            buf = io.BytesIO()
+            image.convert("RGB").save(buf, format="PNG")
+            b64_img = base64.b64encode(buf.getvalue()).decode("ascii")
+            
+            prompt = "Please extract all text from this image exactly as written. Preserve the layout and newlines. Return ONLY the raw text without any markdown blocks or conversational text."
+            response = requests.post(
+                f"{self.vision_url}/api/generate",
+                json={
+                    "model": self.vision_model,
+                    "prompt": prompt,
+                    "images": [b64_img],
+                    "stream": False,
+                    "format": "",
+                    "options": {"temperature": 0.0},
+                },
+                timeout=120,
+            )
+            response.raise_for_status()
+            text = response.json().get("response", "").strip()
+            return OCRResult(
+                text=text,
+                confidence=0.90 if text else 0.0,
+                engine="vision",
+                raw_result={"response": text},
+            )
+        except Exception as exc:
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                engine="vision_failed",
+                raw_result={"error": str(exc)},
+            )
+
     def ocr_pil_image(self, image: Any) -> OCRResult:
         if not self.enabled:
             return OCRResult(text="", confidence=0.0, engine="disabled", raw_result=None)
 
-        primary = self.primary_engine
-        fallback = self.fallback_engine
+        processed = self._preprocess_image(image)
 
-        if primary == "paddle":
-            primary_result = self.ocr_with_paddle(image)
-            if self._is_strong_result(primary_result) or fallback != "tesseract":
-                return primary_result
+        vision_res = self.ocr_with_vision(processed)
+        if self._is_strong_result(vision_res):
+            return vision_res
 
-            fallback_result = self.ocr_with_tesseract(image)
-            if self._prefer_fallback(primary_result, fallback_result):
-                return fallback_result
-            return primary_result
+        paddle_res = self.ocr_with_paddle(processed)
+        if self._is_strong_result(paddle_res):
+            return paddle_res
 
-        if primary == "tesseract":
-            return self.ocr_with_tesseract(image)
+        tesseract_res = self.ocr_with_tesseract(processed)
 
-        return OCRResult(text="", confidence=0.0, engine=f"unsupported:{primary}", raw_result=None)
+        results = [vision_res, paddle_res, tesseract_res]
+        valid_results = [r for r in results if r.text and r.text.strip()]
+
+        if not valid_results:
+            return paddle_res if paddle_res.engine != "paddle_failed" else vision_res
+
+        valid_results.sort(key=lambda r: r.confidence or 0.0, reverse=True)
+        return valid_results[0]
 
     def ocr_with_paddle(self, image: Any) -> OCRResult:
         try:
@@ -177,6 +240,8 @@ class LocalOCRService:
         return len(text) >= 50 and confidence >= self.min_confidence
 
     def _prefer_fallback(self, primary: OCRResult, fallback: OCRResult) -> bool:
+        if primary.engine == "paddle_failed":
+            return True
         primary_text = (primary.text or "").strip()
         fallback_text = (fallback.text or "").strip()
         if not fallback_text:
