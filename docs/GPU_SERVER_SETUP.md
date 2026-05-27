@@ -55,7 +55,7 @@ FILING_VISION_MODEL=llama3.2-vision
 If Ollama runs on a different host:
 
 ```env
-FILING_VISION_OLLAMA_URL=http://GPU_SERVER_IP:11434
+FILING_VISION_OLLAMA_URL=#####
 ```
 
 ## Quick Checks

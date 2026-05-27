@@ -26,7 +26,7 @@ class LocalOCRService:
         )
         self.dpi = int(os.getenv("LOCAL_OCR_DPI", "200"))
         self.vision_enabled = os.getenv("FILING_VISION_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
-        self.vision_url = os.getenv("FILING_VISION_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+        self.vision_url = os.getenv("FILING_VISION_OLLAMA_URL", "####").rstrip("/")
         self.vision_model = os.getenv("FILING_VISION_MODEL", "llama3.2-vision")
         self.primary_engine = os.getenv("LOCAL_OCR_PRIMARY_ENGINE", "paddle").strip().lower()
         self.fallback_engine = os.getenv("LOCAL_OCR_FALLBACK_ENGINE", "tesseract").strip().lower()

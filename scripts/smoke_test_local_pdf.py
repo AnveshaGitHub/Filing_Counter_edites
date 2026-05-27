@@ -6,7 +6,7 @@ from pathlib import Path
 import requests
 
 
-BASE_URL = "http://127.0.0.1:8030/api/v1"
+BASE_URL = "#####"
 
 
 def main(pdf_path: str) -> None:

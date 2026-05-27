@@ -84,7 +84,7 @@ class VisionFallbackService:
     def __init__(self, db: Session) -> None:
         self.db = db
         self.enabled = os.getenv("FILING_VISION_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
-        self.base_url = os.getenv("FILING_VISION_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+        self.base_url = os.getenv("FILING_VISION_OLLAMA_URL", "#####").rstrip("/")
         self.model = os.getenv("FILING_VISION_MODEL", "llama3.2-vision")
         self.max_pages = int(os.getenv("FILING_VISION_MAX_PAGES", "3"))
         self.timeout = int(os.getenv("FILING_VISION_TIMEOUT_SECONDS", "120"))
